@@ -1,4 +1,4 @@
-mport telebot
+import telebot
 import google.generativeai as genai
 import os
 from flask import Flask
@@ -53,3 +53,4 @@ if __name__ == "__main__":
     # Start the bot's polling
     print("Bot is running and polling for messages.")
     bot.polling(non_stop=True)
+
