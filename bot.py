@@ -1,53 +1,55 @@
-import telebot
+mport telebot
 import google.generativeai as genai
 import os
+from flask import Flask
+import threading
 
 # --- SETUP ---
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+app = Flask(__name__) # This is for the web server part
 
-# --- INITIALIZE MODEL AND BOT ---
+# --- Dummy Web Server to Keep Render Happy ---
+@app.route('/')
+def index():
+    return "Bot is running!"
+
+def run_flask_app():
+    # Render provides the port to use in the PORT environment variable
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
+
+# --- BOT INITIALIZATION ---
 try:
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel('gemini-1.5-flash')
     print("Gemini model configured successfully.")
 except Exception as e:
-    print("!!! ERROR CONFIGURING GEMINI MODEL !!!")
-    print(f"DETAILS: {e}")
+    print(f"!!! ERROR CONFIGURING GEMINI: {e}")
     model = None
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
-
-print("Bot is starting...")
+print("Bot starting...")
 
 # --- BOT LOGIC ---
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
-    chat_id = message.chat.id
-    user_question = message.text
-    print(f"Received question from user {chat_id}: {user_question}")
-
     if not model:
-        bot.send_message(chat_id, "😕 Sorry, the AI model was not loaded due to a setup error.")
+        bot.reply_to(message, "Sorry, the AI model is not configured correctly.")
         return
-
     try:
-        thinking_message = bot.send_message(chat_id, "🤔 Thinking (debug mode)...")
-        response = model.generate_content(user_question)
-        bot.edit_message_text(chat_text=response.text, chat_id=chat_id, message_id=thinking_message.message_id)
-        print(f"Reply sent to {chat_id}.")
-        
+        response = model.generate_content(message.text)
+        bot.reply_to(message, response.text)
     except Exception as e:
-        # THIS IS THE MOST IMPORTANT PART
-        # We print the detailed error to the Render logs
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print("!!! AN ERROR OCCURRED WHILE CALLING THE GEMINI API !!!")
-        print(f"!!! ERROR DETAILS: {e}")
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        
-        # And we send a message to the user
-        bot.send_message(chat_id, "😕 An error occurred while contacting the AI. The administrator can see the details.")
+        print(f"!!! AN ERROR OCCURRED: {e}")
+        bot.reply_to(message, "Sorry, an error occurred while processing your request.")
 
-# --- LAUNCH ---
-print("Bot is running and ready (debug mode).")
-bot.polling(non_stop=True)
+# --- LAUNCH EVERYTHING ---
+if __name__ == "__main__":
+    # Start the web server in a separate thread
+    flask_thread = threading.Thread(target=run_flask_app)
+    flask_thread.start()
+    
+    # Start the bot's polling
+    print("Bot is running and polling for messages.")
+    bot.polling(non_stop=True)
