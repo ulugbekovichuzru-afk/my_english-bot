@@ -6,83 +6,128 @@ from flask import Flask
 import threading
 import json
 
-# --- SETUP ---
+# --- НАСТРОЙКА ---
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-ADMIN_ID = 1152974866  # <<< REPLACE THIS WITH YOUR TELEGRAM ID
+ADMIN_ID = 1152974866  # <<< ЗАМЕНИТЕ ЭТО НА ВАШ TELEGRAM ID
 
 USERS_FILE = 'users.json'
 app = Flask(__name__)
 
-# --- USER DATA FUNCTIONS ---
+# --- ФУНКЦИИ ДЛЯ РАБОТЫ С ПОЛЬЗОВАТЕЛЯМИ ---
 def load_users():
     if not os.path.exists(USERS_FILE):
         return {}
     with open(USERS_FILE, 'r', encoding='utf-8') as f:
-        return json.load(f)
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return {}
 
 def save_users(users_data):
     with open(USERS_FILE, 'w', encoding='utf-8') as f:
         json.dump(users_data, f, indent=4, ensure_ascii=False)
 
-# --- WEB SERVER FOR RENDER ---
+# --- ВЕБ-СЕРВЕР (для Render) ---
 @app.route('/')
-def index():
-    return "Bot is running!"
+def index(): return "Bot is running!"
 
 def run_flask_app():
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
 
-# --- BOT AND AI INITIALIZATION ---
+# --- ИНИЦИАЛИЗАЦИЯ БОТА И ИИ ---
 try:
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel('gemini-1.5-flash')
-    print("Gemini model configured successfully.")
+    print("Модель Gemini успешно настроена.")
 except Exception as e:
-    print(f"!!! GEMINI CONFIG ERROR: {e}")
+    print(f"!!! ОШИБКА НАСТРОЙКИ GEMINI: {e}")
     model = None
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 users = load_users()
-print("Bot starting with user approval system...")
+admin_states = {} # Для хранения состояний админа в многошаговых командах
 
-# --- ADMIN DECORATOR ---
-def is_admin(message):
-    return message.from_user.id == ADMIN_ID
+print("Бот запускается с админ-панелью...")
 
-# --- USER REGISTRATION AND APPROVAL ---
+# --- АДМИН-ПАНЕЛЬ И ЕЕ ЛОГИКА ---
+
+def admin_keyboard():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    btn1 = types.KeyboardButton('📊 Статистика')
+    btn2 = types.KeyboardButton('👥 Список учеников')
+    markup.add(btn1, btn2)
+    return markup
+
+@bot.message_handler(commands=['admin'], func=lambda m: m.from_user.id == ADMIN_ID)
+def show_admin_panel(message):
+    bot.reply_to(message, "⚙️ Админ-панель:", reply_markup=admin_keyboard())
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and m.text == '📊 Статистика')
+def handle_stats(message):
+    stats = {'allowed': 0, 'pending': 0, 'rejected': 0}
+    for user_id, data in users.items():
+        status = data.get('status', 'rejected')
+        if status in stats:
+            stats[status] += 1
+    
+    reply = (f"📊 Статистика пользователей:\n\n"
+             f"✅ Одобренные ученики: {stats['allowed']}\n"
+             f"⏳ Ожидают одобрения: {stats['pending']}\n"
+             f"❌ Отклоненные/Забаненные: {stats['rejected']}\n\n"
+             f"Всего в базе: {len(users)}")
+    bot.reply_to(message, reply)
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and m.text == '👥 Список учеников')
+def handle_list_students(message):
+    allowed_users = {uid: data for uid, data in users.items() if data.get('status') == 'allowed'}
+    if not allowed_users:
+        bot.reply_to(message, "Пока нет ни одного одобренного ученика.")
+        return
+    
+    reply = "👥 Список одобренных учеников:\n\n"
+    for user_id, data in allowed_users.items():
+        reply += (f"Имя: {data.get('first_name', 'N/A')}\n"
+                  f"ID: `{user_id}`\n\n") # Используем Markdown для удобного копирования ID
+    bot.reply_to(message, reply, parse_mode='Markdown')
+
+# --- ЛОГИКА РЕГИСТРАЦИИ И ОДОБРЕНИЯ ---
+
 @bot.message_handler(commands=['start'])
 def handle_start(message):
+    if message.from_user.id == ADMIN_ID:
+        show_admin_panel(message)
+        return
+
     user_id = str(message.from_user.id)
     user_data = users.get(user_id)
 
     if user_data:
         status = user_data.get('status', 'rejected')
         if status == 'allowed':
-            bot.reply_to(message, "Welcome back! You are an approved user.")
+            bot.reply_to(message, "Здравствуйте! Вы уже одобрены. Можете задавать вопросы.")
         elif status == 'pending':
-            bot.reply_to(message, "Your request for access is still pending.")
+            bot.reply_to(message, "Ваша заявка на доступ еще на рассмотрении. Пожалуйста, ожидайте.")
         else: # rejected
-            bot.reply_to(message, "Sorry, your request for access was denied.")
+            bot.reply_to(message, "К сожалению, ваша заявка на доступ была отклонена.")
     else:
-        # New user
+        # Новый пользователь
         first_name = message.from_user.first_name
-        username = message.from_user.username or "not provided"
+        username = message.from_user.username or "не указан"
         
         users[user_id] = {'first_name': first_name, 'username': username, 'status': 'pending'}
         save_users(users)
         
-        bot.reply_to(message, "Hello! Your request for access has been sent to the administrator. Please wait for approval.")
+        bot.reply_to(message, "Здравствуйте! Ваша заявка на доступ отправлена администратору. Пожалуйста, ожидайте решения.")
         
-        # Send notification to admin (this is the corrected, safer version)
         markup = types.InlineKeyboardMarkup()
-        btn_allow = types.InlineKeyboardButton("✅ Allow", callback_data=f"allow_{user_id}")
-        btn_reject = types.InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user_id}")
+        btn_allow = types.InlineKeyboardButton("✅ Разрешить", callback_data=f"allow_{user_id}")
+        btn_reject = types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{user_id}")
         markup.add(btn_allow, btn_reject)
         
-        admin_text = (f"❗️ New access request:\n\n"
-                      f"Name: {first_name}\n"
+        admin_text = (f"❗️ Новый запрос на доступ:\n\n"
+                      f"Имя: {first_name}\n"
                       f"Username: @{username}\n"
                       f"Telegram ID: {user_id}")
         bot.send_message(ADMIN_ID, admin_text, reply_markup=markup)
@@ -96,39 +141,45 @@ def handle_approval(call):
         users[user_id]['status'] = new_status
         save_users(users)
         
-        bot.edit_message_text(f"Decision made: {new_status} for user {user_id}.", call.message.chat.id, call.message.message_id)
+        bot.edit_message_text(f"Решение принято: {new_status} для пользователя {user_id}.", call.message.chat.id, call.message.message_id)
         
         if new_status == 'allowed':
-            bot.send_message(user_id, "✅ Your request for access has been approved! You can now ask questions.")
+            bot.send_message(user_id, "✅ Ваша заявка на доступ одобрена! Теперь вы можете задавать вопросы.")
         else:
-            bot.send_message(user_id, "❌ Your request for access has been denied.")
+            bot.send_message(user_id, "❌ Ваша заявка на доступ была отклонена.")
     else:
-        bot.edit_message_text("Error: User not found.", call.message.chat.id, call.message.message_id)
+        bot.edit_message_text("Ошибка: пользователь не найден.", call.message.chat.id, call.message.message_id)
 
-# --- MAIN MESSAGE HANDLER ---
+
+# --- ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ ---
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
+    # Админ использует только кнопки и команды
+    if message.from_user.id == ADMIN_ID:
+        bot.reply_to(message, "Пожалуйста, используйте кнопки админ-панели или отправьте /admin.", reply_markup=admin_keyboard())
+        return
+
     user_id = str(message.from_user.id)
     user_data = users.get(user_id)
 
     if not user_data or user_data.get('status') != 'allowed':
-        bot.reply_to(message, "You do not have access. Please send /start to request access.")
+        bot.reply_to(message, "У вас нет доступа. Пожалуйста, отправьте /start, чтобы подать заявку.")
         return
         
     if not model:
-        bot.reply_to(message, "Sorry, the AI model is not configured correctly.")
+        bot.reply_to(message, "Извините, модель ИИ не настроена.")
         return
     try:
         response = model.generate_content(message.text)
         bot.reply_to(message, response.text)
     except Exception as e:
-        print(f"!!! AN ERROR OCCURRED: {e}")
-        bot.reply_to(message, "Sorry, an error occurred while processing your request.")
+        print(f"!!! ПРОИЗОШЛА ОШИБКА: {e}")
+        bot.reply_to(message, "Извините, произошла ошибка при обработке вашего запроса.")
 
-# --- LAUNCH ---
+
+# --- ЗАПУСК ---
 if __name__ == "__main__":
     flask_thread = threading.Thread(target=run_flask_app)
     flask_thread.start()
-    print("Bot is running and polling for messages.")
+    print("Бот запущен и готов к работе.")
     bot.polling(non_stop=True)
-
